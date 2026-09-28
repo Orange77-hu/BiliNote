@@ -25,6 +25,7 @@ import TranscriptViewer from '@/pages/HomePage/components/transcriptViewer.tsx'
 import MarkmapEditor from '@/pages/HomePage/components/MarkmapComponent.tsx'
 import ChatPanel from '@/pages/HomePage/components/ChatPanel.tsx'
 import VideoBanner from '@/pages/HomePage/components/VideoBanner.tsx'
+import { embedImagesAsBase64, extractStaticPath } from '@/utils/embedImages'
 
 interface VersionNote {
   ver_id: string
@@ -180,7 +181,11 @@ function createMarkdownComponents(baseURL: string) {
     },
     img: ({ node, ...props }: any) => {
       let src = props.src
-      if (src.startsWith('/')) {
+      // 兼容两种错误引用形态：/static/... 相对路径、D:\... 反斜杠绝对路径
+      const staticPath = src ? extractStaticPath(src) : null
+      if (staticPath) {
+        src = baseURL + staticPath
+      } else if (src && src.startsWith('/')) {
         src = baseURL + src
       }
       props.src = src
@@ -403,10 +408,39 @@ const MarkdownViewer: FC<MarkdownViewerProps> = memo(({ status }) => {
       URL.revokeObjectURL(url)
     },
   }
-  const handleDownload = () => {
+  const handleDownload = async () => {
     const task = getCurrentTask()
     const name = task?.audioMeta.title || 'note'
-    const blob = new Blob([selectedContent], { type: 'text/markdown;charset=utf-8' })
+
+    // 导出前把本地图片内嵌为 base64，同时修复图片引用的两种错误形态
+    // （/static/... 无主机相对路径、D:\... 反斜杠绝对路径）
+    const loadingToast = toast.loading('正在嵌入图片…')
+    let content = selectedContent
+    let embedded = 0
+    let fallback = 0
+    try {
+      const result = await embedImagesAsBase64(selectedContent, baseURL, (done, total) => {
+        toast.loading(`正在嵌入图片… ${done}/${total}`, { id: loadingToast })
+      })
+      content = result.content
+      embedded = result.embedded
+      fallback = result.fallback
+      if (embedded + fallback > 0) {
+        toast.success(
+          fallback > 0
+            ? `已导出，${embedded} 张图片已内嵌，${fallback} 张取图失败已改为完整链接`
+            : `已导出，${embedded} 张图片已内嵌`,
+          { id: loadingToast, duration: 3000 }
+        )
+      } else {
+        toast.dismiss(loadingToast)
+      }
+    } catch {
+      // 内嵌失败不阻塞导出，回退为原始内容
+      toast.error('图片内嵌失败，已按原样导出', { id: loadingToast })
+    }
+
+    const blob = new Blob([content], { type: 'text/markdown;charset=utf-8' })
     const link = document.createElement('a')
     link.href = URL.createObjectURL(blob)
     link.download = `${name}.md`
