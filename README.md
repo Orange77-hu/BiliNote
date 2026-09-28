@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/license-MIT-blue.svg" />
   <img src="https://img.shields.io/badge/frontend-react%2019-blue" />
   <img src="https://img.shields.io/badge/backend-fastapi-green" />
-  <img src="https://img.shields.io/badge/GPT-openai%20%7C%20deepseek%20%7C%20qwen-ff69b4" />
+  <img src="https://img.shields.io/badge/AI-hermes%20%7C%20xiaomi%20mimo-ff69b4" />
   <img src="https://img.shields.io/github/stars/Orange77-hu/BiliNote?style=social" />
 </p>
 
