@@ -1,5 +1,6 @@
 import json
 import logging
+import subprocess
 import threading
 import time
 from typing import Optional, List, Dict, Union
@@ -8,6 +9,7 @@ import requests
 
 from app.decorators.timeit import timeit
 from app.models.transcriber_model import TranscriptSegment, TranscriptResult
+from app.services.proxy_config_manager import ProxyConfigManager
 from app.transcriber.base import Transcriber
 from app.utils.logger import get_logger
 from events import transcription_finished
@@ -165,19 +167,43 @@ class BcutTranscriber(Transcriber):
         return self.task_id
 
     def _query_result(self) -> dict:
-        """查询转换结果"""
-        resp = self.session.get(
-            API_QUERY_RESULT, 
-            params={"model_id": 7, "task_id": self.task_id}, 
-            headers=self.headers
-        )
-        resp.raise_for_status()
-        resp = resp.json()
+        """查询转换结果
+
+        走 curl 子进程而非 requests：B站安全网关按 TLS 指纹精准拦截
+        python-requests（412 验证码页），实测 UA / cookie / 出口 IP 都无法
+        绕过，而同一环境下 curl 能正常拿到业务 JSON。curl 自动继承
+        HTTP_PROXY 环境变量，ProxyConfigManager 的 UI 代理开关同样生效。
+        """
+        cmd = [
+            "curl", "-sS", "-G", API_QUERY_RESULT,
+            "--data-urlencode", "model_id=7",
+            "--data-urlencode", f"task_id={self.task_id}",
+            "-H", f"User-Agent: {self.headers['User-Agent']}",
+            "-H", "Content-Type: application/json",
+            "-m", "30",
+        ]
+        proxy = ProxyConfigManager().get_proxy_url()
+        if proxy:
+            cmd += ["-x", proxy]
+        try:
+            out = subprocess.run(cmd, capture_output=True, timeout=45, check=True).stdout
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+            detail = getattr(e, "stderr", b"") or b""
+            error_msg = f"查询结果失败: curl 异常 {e} {detail.decode(errors='ignore')[:200]}"
+            logger.error(error_msg)
+            raise Exception(error_msg)
+        try:
+            resp = json.loads(out)
+        except ValueError:
+            # B站安全网关拦截时返回 HTML 验证码页（HTTP 412），不是 JSON
+            error_msg = "查询结果失败: B站接口返回非 JSON（疑似安全网关 412 拦截）"
+            logger.error(error_msg)
+            raise Exception(error_msg)
         if resp.get("code") != 0:
             error_msg = f"查询结果失败: {resp.get('message', '未知错误')}"
             logger.error(error_msg)
             raise Exception(error_msg)
-            
+
         return resp["data"]
 
     @timeit
