@@ -24,7 +24,9 @@ export const testConnection = async (data: any, opts?: CallOpts) => {
 }
 
 export const fetchModels = async (providerId: string) => {
-  return await request.get('/model_list/' + providerId)
+  // 后端要走代理去 LLM 供应商拉 /models，慢时超过全局 10s 会被前端掐断
+  // （现象：获取模型列表弹「请求失败，请检查网络连接」），放宽到 60s。
+  return await request.get('/model_list/' + providerId, { timeout: 60_000 })
 }
 
 export const fetchEnableModelById = async (id: string) => {
