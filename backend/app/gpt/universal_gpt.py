@@ -14,6 +14,7 @@ from app.gpt.request_chunker import RequestChunker
 from app.models.transcriber_model import TranscriptSegment
 from datetime import timedelta
 from typing import List
+from types import SimpleNamespace
 
 
 class UniversalGPT(GPT):
@@ -196,22 +197,42 @@ class UniversalGPT(GPT):
             or "only the default" in raw
         )
 
+    def _stream_collect(self, **kwargs):
+        """流式调用并拼接完整内容，返回与非流式相同的
+        choices[0].message.content 形状（调用方只消费该字段）。
+
+        为什么必须流式：9router.orange77.cc 挂在 Cloudflare 后面，CF 的
+        origin 响应超时是 120s（Error 524）。非流式要等模型把整篇笔记
+        生成完才回第一个字节，长文本单次生成必然超过 120s 被 CF 掐断；
+        流式下上游持续吐字，CF 只要收到数据流就不会 524。
+        """
+        stream = self.client.chat.completions.create(
+            model=self.model,
+            messages=kwargs.pop("messages"),
+            stream=True,
+            **kwargs,
+        )
+        parts: list[str] = []
+        for chunk in stream:
+            if not getattr(chunk, "choices", None):
+                continue  # 末尾仅带 usage 的空包
+            text = getattr(chunk.choices[0].delta, "content", None)
+            if text:
+                parts.append(text)
+        content = "".join(parts)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(content=content))]
+        )
+
     def _do_create(self, messages: list):
-        """单次调用。如果模型拒绝自定义 temperature，就地去掉该参数再试一次
-        （不消耗外层的重试次数预算），仍失败则把异常抛给外层重试逻辑。"""
+        """单次调用（流式）。如果模型拒绝自定义 temperature，就地去掉该参数
+        再试一次（不消耗外层的重试次数预算），仍失败则抛给外层重试逻辑。"""
         try:
-            return self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=self.temperature,
-            )
+            return self._stream_collect(messages=messages, temperature=self.temperature)
         except Exception as exc:
             if self._is_temperature_unsupported_error(exc):
                 print(f"[universal_gpt] 模型 {self.model} 不支持自定义 temperature，改用默认值重试")
-                return self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                )
+                return self._stream_collect(messages=messages)
             raise
 
     def _chat_completion_create(self, messages: list):
@@ -224,6 +245,10 @@ class UniversalGPT(GPT):
                 if attempt == self._max_retry_attempts - 1 or not self._is_retryable_error(exc):
                     raise
                 sleep_seconds = self._retry_base_backoff * (2 ** attempt)
+                # CF 524 = origin 超时，Cloudflare 官方要求退避 ≥120s，
+                # 1.5s 级的快速重试只会连续撞同一堵墙；折中退 60s。
+                if getattr(exc, "status_code", None) == 524:
+                    sleep_seconds = max(sleep_seconds, 60.0)
                 time.sleep(sleep_seconds)
 
         if last_exc is not None:
