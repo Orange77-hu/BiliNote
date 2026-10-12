@@ -224,6 +224,10 @@ const NoteForm = () => {
     console.log('Not even go here')
     const payload: NoteFormValues = {
       ...values,
+      // 「截图」勾选存在于 format 数组，但后端靠独立的 screenshot bool 决定
+      // 是否下载视频（video_path）。两者不联动会导致勾了截图却静默不出图
+      //（GPT 输出的 Screenshot 占位无人替换）。
+      screenshot: values.format?.includes('screenshot') || values.screenshot || false,
       video_url:
         values.platform === 'local' ? values.video_url : withScheme(values.video_url || ''),
       provider_id: modelList.find(m => m.model_name === values.model_name)!.provider_id,

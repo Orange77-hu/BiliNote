@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from dataclasses import asdict
 from pathlib import Path
 from typing import List, Optional, Tuple, Union, Any
@@ -450,9 +451,10 @@ class NoteGenerator:
                 else:
                     logger.info("未指定 grid_size，跳过缩略图生成")
             except Exception as exc:
-                logger.error(f"视频下载失败：{exc}")
-                self._handle_exception(task_id, exc)
-                raise
+                # 截图/抽帧是锦上添花：视频拿不到（纯音频上传、ffmpeg 抽帧
+                # 失败等）不该弄死整个笔记任务——降级为跳过截图继续生成。
+                logger.warning(f"视频下载/抽帧失败，跳过截图继续生成：{exc}")
+                self.video_path = None
 
         # 下载音频
         try:
@@ -644,6 +646,12 @@ class NoteGenerator:
                 markdown = self._insert_screenshots(markdown, video_path)
             except Exception as exc:
                 logger.warning("截图插入失败，跳过该步骤")
+        elif "screenshot" in formats:
+            # 勾了截图但没有视频文件（如上传的是纯音频、视频下载失败）：
+            # 清理 GPT 生成的占位标记，避免笔记里留下一堆
+            # [Screenshot-xx:xx] 死文本。
+            logger.warning("已勾选截图但未获取到视频文件，跳过截图并清理占位标记")
+            markdown = re.sub(r"\*?Screenshot-\[?\d{2}:\d{2}\]?\*?", "", markdown)
 
         if "link" in formats:
             try:
