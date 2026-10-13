@@ -1,6 +1,8 @@
 from abc import ABC
 import glob
 import os
+import re
+import time
 
 from app.decorators.timeit import timeit
 from app.models.transcriber_model import TranscriptResult, TranscriptSegment
@@ -27,6 +29,47 @@ CHUNK_TARGET_BYTES = 15 * 1024 * 1024  # 每片目标体积（Groq 上限 25MB�
 def probe_duration(path: str) -> float:
     probe = ffmpeg.probe(path)
     return float(probe["format"]["duration"])
+
+
+RATE_LIMIT_MAX_ATTEMPTS = 3
+
+
+def _parse_retry_after(error_msg: str) -> float:
+    """从 Groq 429 报错里解析建议等待秒数。
+
+    形如 `Please try again in 6m20.5s` 或 `Please try again in 30.5s`，
+    解析不到时兜底 60s，另加 15s buffer 避免卡在窗口边界反复撞限。
+    """
+    m = re.search(r"try again in (\d+)m\s*([\d.]+)s", error_msg)
+    if m:
+        return int(m.group(1)) * 60 + float(m.group(2)) + 15
+    m = re.search(r"try again in ([\d.]+)s", error_msg)
+    if m:
+        return float(m.group(1)) + 15
+    return 60.0
+
+
+def _transcribe_chunk(client, chunk_path: str):
+    """调用一次 Groq 转写；遇到 429 限流按报错建议等待后自动重试。
+
+    Groq 免费档有「每小时音频秒数(ASPH) 7200」限制，超长合集切片转写
+    容易撞限。429 是唯一值得等待重试的错误，其他错误直接抛出。
+    """
+    import openai
+    for attempt in range(1, RATE_LIMIT_MAX_ATTEMPTS + 1):
+        try:
+            with open(chunk_path, "rb") as file:
+                return client.audio.transcriptions.create(
+                    file=(chunk_path, file.read()),
+                    model=os.getenv('GROQ_TRANSCRIBER_MODEL'),
+                    response_format="verbose_json",
+                )
+        except openai.RateLimitError as exc:
+            if attempt == RATE_LIMIT_MAX_ATTEMPTS:
+                raise
+            wait = _parse_retry_after(str(exc))
+            print(f"Groq 限流(429)，{wait:.0f}s 后重试（第 {attempt}/{RATE_LIMIT_MAX_ATTEMPTS} 次）...")
+            time.sleep(wait)
 
 
 def split_audio_chunks(input_path: str, chunk_bytes: int = CHUNK_TARGET_BYTES) -> list:
@@ -117,12 +160,7 @@ class GroqTranscriber(Transcriber, ABC):
         raw_chunks = []
         offset = 0.0
         for i, chunk in enumerate(chunks):
-            with open(chunk, "rb") as file:
-                transcription = client.audio.transcriptions.create(
-                    file=(chunk, file.read()),
-                    model=os.getenv('GROQ_TRANSCRIBER_MODEL'),
-                    response_format="verbose_json",
-                )
+            transcription = _transcribe_chunk(client, chunk)
             if len(chunks) > 1:
                 print(f"第 {i + 1}/{len(chunks)} 片转写完成：{transcription.text[:40]}...")
             language = language or transcription.language
